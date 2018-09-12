@@ -343,38 +343,38 @@ void Host::startPeerSession(Public const& _id, RLP const& _rlp, unique_ptr<RLPXF
     LOG(m_logger) << "p2p.host.peer.register " << _id;
 }
 
-void Host::onNodeTableEvent(NodeID const& _n, NodeTableEventType const& _e)
+void Host::onNodeTableEvent(NodeID const& _nodeID, NodeTableEventType const& _e)
 {
     if (_e == NodeEntryAdded)
     {
-        LOG(m_logger) << "p2p.host.nodeTable.events.nodeEntryAdded " << _n;
-        if (Node n = nodeFromNodeTable(_n))
+        LOG(m_logger) << "p2p.host.nodeTable.events.nodeEntryAdded " << _nodeID;
+        if (Node node = nodeFromNodeTable(_nodeID))
         {
-            shared_ptr<Peer> p;
+            shared_ptr<Peer> peer;
             DEV_RECURSIVE_GUARDED(x_sessions)
             {
-                if (m_peers.count(_n))
-                {
-                    p = m_peers[_n];
-                    p->endpoint = n.endpoint;
-                }
+                auto const itPeer = m_peers.find(_nodeID);
+                if (itPeer != m_peers.end() &&
+                    itPeer->second->endpoint.address() == node.endpoint.address())
+                    peer = itPeer->second;
                 else
                 {
-                    p = make_shared<Peer>(n);
-                    m_peers[_n] = p;
-                    LOG(m_logger) << "p2p.host.peers.events.peerAdded " << _n << " " << p->endpoint;
+                    peer = make_shared<Peer>(node);
+                    m_peers[_nodeID] = peer;
+                    LOG(m_logger) << "p2p.host.peers.events.peerAdded " << _nodeID << " "
+                                  << peer->endpoint;
                 }
             }
             if (peerSlotsAvailable(Egress))
-                connect(p);
+                connect(peer);
         }
     }
     else if (_e == NodeEntryDropped)
     {
-        LOG(m_logger) << "p2p.host.nodeTable.events.NodeEntryDropped " << _n;
+        LOG(m_logger) << "p2p.host.nodeTable.events.NodeEntryDropped " << _nodeID;
         RecursiveGuard l(x_sessions);
-        if (m_peers.count(_n) && m_peers[_n]->peerType == PeerType::Optional)
-            m_peers.erase(_n);
+        if (m_peers.count(_nodeID) && m_peers[_nodeID]->peerType == PeerType::Optional)
+            m_peers.erase(_nodeID);
     }
 }
 
@@ -535,41 +535,44 @@ void Host::addNode(NodeID const& _node, NodeIPEndpoint const& _endpoint)
     addNodeToNodeTable(Node(_node, _endpoint));
 }
 
-void Host::requirePeer(NodeID const& _n, NodeIPEndpoint const& _endpoint)
+void Host::requirePeer(NodeID const& _nodeID, NodeIPEndpoint const& _endpoint)
 {
     {
         Guard l(x_requiredPeers);
-        m_requiredPeers.insert(_n);
+        m_requiredPeers.insert(_nodeID);
     }
 
     if (!m_run)
         return;
-    
-    if (_n == id())
+
+    if (_nodeID == id())
     {
-        cnetdetails << "Ingoring the request to connect to self " << _n;
+        cnetdetails << "Ingoring the request to connect to self " << _nodeID;
         return;
     }
 
-    Node node(_n, _endpoint, PeerType::Required);
-    if (_n)
+    Node node(_nodeID, _endpoint, PeerType::Required);
+    if (_nodeID)
     {
         // create or update m_peers entry
-        shared_ptr<Peer> p;
+        shared_ptr<Peer> peer;
         DEV_RECURSIVE_GUARDED(x_sessions)
-            if (m_peers.count(_n))
+        {
+            auto const itPeer = m_peers.find(_nodeID);
+            if (itPeer != m_peers.end() &&
+                itPeer->second->endpoint.address() == node.endpoint.address())
             {
-                p = m_peers[_n];
-                p->endpoint = node.endpoint;
-                p->peerType = PeerType::Required;
+                peer = itPeer->second;
+                peer->peerType = PeerType::Required;
             }
             else
             {
-                p = make_shared<Peer>(node);
-                m_peers[_n] = p;
+                peer = make_shared<Peer>(node);
+                m_peers[_nodeID] = peer;
             }
+        }
         // required for discovery
-        addNodeToNodeTable(*p, NodeTable::NodeRelation::Unknown);
+        addNodeToNodeTable(*peer, NodeTable::NodeRelation::Unknown);
     }
     else
     {
@@ -577,10 +580,9 @@ void Host::requirePeer(NodeID const& _n, NodeIPEndpoint const& _endpoint)
             return;
         auto t = make_shared<boost::asio::deadline_timer>(m_ioService);
         t->expires_from_now(boost::posix_time::milliseconds(600));
-        t->async_wait([this, _n](boost::system::error_code const& _ec)
-        {
+        t->async_wait([this, _nodeID](boost::system::error_code const& _ec) {
             if (!_ec)
-                if (auto n = nodeFromNodeTable(_n))
+                if (auto n = nodeFromNodeTable(_nodeID))
                     requirePeer(n.id, n.endpoint);
         });
         DEV_GUARDED(x_timers)
